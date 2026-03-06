@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>主播大赛 · 虚拟购物</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; background: #f5f5f5; padding-bottom: 80px; }
+    .header { background: #fff; padding: 15px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .header h1 { font-size: 18px; color: #333; }
+    .quota { margin-top: 8px; font-size: 14px; color: #666; }
+    .product-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px; }
+    .product-card { background: #fff; border-radius: 8px; padding: 10px; text-align: center; }
+    .product-img { width: 100%; height: 120px; object-fit: cover; border-radius: 4px; }
+    .product-name { font-size: 14px; color: #333; margin: 8px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .product-price { font-size: 16px; color: #e63946; font-weight: bold; margin-bottom: 8px; }
+    .add-btn { width: 100%; padding: 8px; border: none; border-radius: 4px; background: #457b9d; color: #fff; font-size: 14px; cursor: pointer; }
+    .add-btn.disabled { background: #ccc; cursor: not-allowed; }
+    .bottom-bar { position: fixed; bottom: 0; left: 0; right: 0; background: #fff; padding: 10px; box-shadow: 0 -2px 4px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }
+    .cart-info { font-size: 14px; color: #333; }
+    .checkout-btn { padding: 8px 16px; border: none; border-radius: 4px; background: #e63946; color: #fff; font-size: 14px; cursor: pointer; }
+    .checkout-btn:disabled { background: #ccc; cursor: not-allowed; }
+    .toast { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.7); color: #fff; padding: 10px 20px; border-radius: 4px; font-size: 14px; display: none; z-index: 999; }
+    .toast.active { display: block; }
+    .loading { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,0.8); display: flex; justify-content: center; align-items: center; font-size: 16px; color: #666; z-index: 998; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="loading" id="loading">正在加载...</div>
+  <div class="header">
+    <h1>主播大赛 · 虚拟购物</h1>
+    <div class="quota">剩余额度：<span id="remainingQuota">6000</span> 元</div>
+  </div>
+  <div class="product-grid" id="productGrid"></div>
+  <div class="bottom-bar">
+    <div class="cart-info">购物车：<span id="cartTotal">0</span> 元（<span id="cartCount">0</span> 件）</div>
+    <button class="checkout-btn" id="checkoutBtn" disabled onclick="checkout()">结算下单</button>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // ========== 配置项（替换成你的Supabase信息） ==========
+    const SUPABASE_URL = 'https://pewvoezygdzxnykulnzp.supabase.co'; // 例：https://abc123.supabase.co
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBld3ZvZXp5Z2R6eG55a3VsbnpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxNzY4OTAsImV4cCI6MjA4Nzc1Mjg5MH0.JTD8vr11w8cKVCO8ePIcSgtjho3Dpdzf3YtGNzzf18g';
+    const INITIAL_QUOTA = 6000; // 初始虚拟额度
+    // 商品列表（静态写死，可直接修改）
+    const PRODUCTS = [
+      { id: 1, name: '福鼎白茶-白毫银针', price: 1500, image: 'https://picsum.photos/200/200?1' },
+      { id: 2, name: '福鼎白茶-白牡丹', price: 1200, image: 'https://picsum.photos/200/200?2' },
+      { id: 3, name: '福鼎白茶-寿眉', price: 800, image: 'https://picsum.photos/200/200?3' },
+      { id: 4, name: '福鼎白茶-贡眉', price: 1000, image: 'https://picsum.photos/200/200?4' },
+      { id: 5, name: '福鼎白茶-老白茶', price: 2000, image: 'https://picsum.photos/200/200?5' },
+      { id: 6, name: '福鼎白茶-荒野银针', price: 2500, image: 'https://picsum.photos/200/200?6' }
+    ];
+
+    // ========== 全局变量（仅声明一次！） ==========
+    let supabaseInstance; // 改名避免重复声明
+    let userId = ''; 
+    let cart = []; 
+    let purchasedProducts = []; 
+
+    // ========== 初始化 ==========
+    async function init() {
+      try {
+        // 1. 初始化Supabase（仅初始化一次）
+        if (window.supabase) {
+          supabaseInstance = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        } else {
+          throw new Error('Supabase库未加载');
+        }
+        // 2. 生成/读取用户ID
+        userId = localStorage.getItem('virtual_shopping_user_id') || `user_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        localStorage.setItem('virtual_shopping_user_id', userId);
+        // 3. 读取已购买商品
+        purchasedProducts = JSON.parse(localStorage.getItem('virtual_shopping_purchased') || '[]');
+        // 4. 读取购物车
+        cart = JSON.parse(localStorage.getItem('virtual_shopping_cart') || '[]');
+        cart = cart.filter(id => !purchasedProducts.includes(id));
+        // 5. 渲染页面
+        renderProducts();
+        updateUI();
+      } catch (err) {
+        showToast('初始化失败，本地模式运行');
+        // 即使初始化失败，也显示商品（本地模式）
+        renderProducts();
+        updateUI();
+        console.error('初始化错误：', err);
+      } finally {
+        // 无论成败，都隐藏加载
+        document.getElementById('loading').classList.add('hidden');
+      }
+    }
+
+    // ========== 页面渲染 ==========
+    function renderProducts() {
+      const grid = document.getElementById('productGrid');
+      grid.innerHTML = '';
+      PRODUCTS.forEach(product => {
+        const isPurchased = purchasedProducts.includes(product.id);
+        const isInCart = cart.includes(product.id);
+        const btnDisabled = isPurchased || isInCart;
+        const btnText = isPurchased ? '已购买' : (isInCart ? '已加入购物车' : '加入购物车');
+        
+        grid.innerHTML += `
+          <div class="product-card">
+            <img src="${product.image}" class="product-img" alt="${product.name}">
+            <div class="product-name">${product.name}</div>
+            <div class="product-price">¥${product.price}</div>
+            <button class="add-btn ${btnDisabled ? 'disabled' : ''}" 
+                    ${btnDisabled ? 'disabled' : ''}
+                    onclick="addToCart(${product.id})">
+              ${btnText}
+            </button>
+          </div>
+        `;
+      });
+    }
+
+    // 更新购物车、额度、按钮状态
+    function updateUI() {
+      // 计算购物车总价
+      const cartTotal = cart.reduce((sum, id) => {
+        const product = PRODUCTS.find(p => p.id === id);
+        return sum + (product ? product.price : 0);
+      }, 0);
+      // 剩余额度
+      const remainingQuota = INITIAL_QUOTA - cartTotal;
+      // 更新DOM
+      document.getElementById('remainingQuota').textContent = remainingQuota;
+      document.getElementById('cartTotal').textContent = cartTotal;
+      document.getElementById('cartCount').textContent = cart.length;
+      // 结算按钮：购物车为空/超额度则禁用
+      const checkoutBtn = document.getElementById('checkoutBtn');
+      checkoutBtn.disabled = cart.length === 0 || cartTotal > INITIAL_QUOTA;
+      // 本地存储购物车
+      localStorage.setItem('virtual_shopping_cart', JSON.stringify(cart));
+    }
+
+    // ========== 购物车操作 ==========
+    function addToCart(productId) {
+      const product = PRODUCTS.find(p => p.id === productId);
+      if (!product) { showToast('商品不存在'); return; }
+      if (purchasedProducts.includes(productId)) { showToast('该商品已购买，每人限购1件'); return; }
+      if (cart.includes(productId)) { showToast('已在购物车中'); return; }
+      
+      const cartTotal = cart.reduce((sum, id) => {
+        const p = PRODUCTS.find(p => p.id === id);
+        return sum + (p ? p.price : 0);
+      }, 0);
+      if (cartTotal + product.price > INITIAL_QUOTA) {
+        showToast(`超出额度！剩余额度：${INITIAL_QUOTA - cartTotal}元`);
+        return;
+      }
+
+      cart.push(productId);
+      updateUI();
+      renderProducts();
+      showToast(`已加入购物车：${product.name}`);
+    }
+
+    // ========== 下单操作 ==========
+    async function checkout() {
+      const cartTotal = cart.reduce((sum, id) => {
+        const product = PRODUCTS.find(p => p.id === id);
+        return sum + (product ? product.price : 0);
+      }, 0);
+      
+      try {
+        showToast('正在提交订单...');
+        // 提交订单到Supabase（仅当初始化成功时）
+        if (supabaseInstance) {
+          const { error } = await supabaseInstance.from('orders').insert([{
+            user_id: userId,
+            products: cart,
+            total_amount: cartTotal,
+            created_at: new Date().toISOString()
+          }]);
+          if (error) throw error;
+        }
+        // 标记商品为已购买
+        purchasedProducts.push(...cart);
+        localStorage.setItem('virtual_shopping_purchased', JSON.stringify(purchasedProducts));
+        // 清空购物车
+        cart = [];
+        localStorage.setItem('virtual_shopping_cart', JSON.stringify(cart));
+        // 刷新页面
+        updateUI();
+        renderProducts();
+        showToast(`下单成功！消费¥${cartTotal}`);
+      } catch (err) {
+        showToast('下单失败，本地记录已更新');
+        // 即使提交失败，本地也标记已购买（保证限购逻辑）
+        purchasedProducts.push(...cart);
+        localStorage.setItem('virtual_shopping_purchased', JSON.stringify(purchasedProducts));
+        cart = [];
+        localStorage.setItem('virtual_shopping_cart', JSON.stringify(cart));
+        updateUI();
+        renderProducts();
+        console.error('下单错误：', err);
+      }
+    }
+
+    // ========== 工具函数 ==========
+    function showToast(text) {
+      const toast = document.getElementById('toast');
+      toast.textContent = text;
+      toast.classList.add('active');
+      setTimeout(() => toast.classList.remove('active'), 2000);
+    }
+
+    // 页面加载完成后初始化
+    document.addEventListener('DOMContentLoaded', init);
+  </script>
+</body>
+</html>
